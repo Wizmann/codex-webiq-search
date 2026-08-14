@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "license": "MIT",
+  "author": "sxwxs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sxwxs/codex-webiq-search.git",
+    "directory": "plugins/webiq-search"
+  },
   "scripts": {
     "test": "node --test"
   },

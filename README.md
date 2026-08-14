@@ -29,6 +29,17 @@ $env:WEBIQ_API_KEY = "..."
 See [the plugin README](./plugins/webiq-search/README.md) for all configuration
 variables and behavior.
 
+## Privacy
+
+Search queries are sent to `WEBIQ_ENDPOINT`. With the default configuration they
+stay on the local machine and are handled by `ghc-api`. When using Microsoft Web
+IQ directly or another proxy, queries leave the machine and may be logged by that
+service. Do not include passwords, tokens, private keys, or other sensitive data
+in search queries.
+
+Credentials are read from environment variables and sent only as request headers
+to the configured endpoint. They are not included in tool output.
+
 ## Development
 
 ```powershell

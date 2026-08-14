@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Lightweight Microsoft Web IQ search for Codex",
   "author": {
-    "name": "sxw"
+    "name": "sxwxs"
   },
   "license": "MIT",
   "keywords": [
@@ -16,7 +16,7 @@
     "displayName": "Web IQ Search",
     "shortDescription": "Search the web through Microsoft Web IQ.",
     "longDescription": "Adds one compact, read-only webiq_search tool backed by Microsoft Web IQ or a local ghc-api proxy.",
-    "developerName": "sxw",
+    "developerName": "sxwxs",
     "category": "Productivity",
     "capabilities": [
       "Web Search",
