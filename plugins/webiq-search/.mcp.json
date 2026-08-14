@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "webiq": {
+      "command": "node",
+      "args": ["./server.mjs"],
+      "cwd": ".",
+      "env_vars": [
+        "WEBIQ_ENDPOINT",
+        "WEBIQ_API_KEY",
+        "WEBIQ_TOKEN",
+        "WEBIQ_TIMEOUT_MS",
+        "WEBIQ_MAX_RESULTS",
+        "WEBIQ_MAX_LENGTH"
+      ]
+    }
+  }
+}
