@@ -1,7 +1,10 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { parse } from "./vendor/toml.mjs";
 
 export const SEARCH_PATH = "/v3/search/web";
-export const DEFAULT_ENDPOINT = `http://127.0.0.1:8313${SEARCH_PATH}`;
 export const MAX_RESULTS = 10;
 export const MAX_QUERY_LENGTH = 400;
 export const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -48,9 +51,45 @@ export function normalizeEndpoint(raw) {
   return url.toString();
 }
 
+function codexSearchEndpoint(env) {
+  const configPath = join(env.CODEX_HOME?.trim() || join(homedir(), ".codex"), "config.toml");
+  let source;
+  try {
+    source = readFileSync(configPath, "utf8");
+  } catch {
+    throw new Error(`Could not read Codex config at ${configPath}; set WEBIQ_ENDPOINT explicitly`);
+  }
+  let config;
+  try {
+    config = parse(source);
+  } catch {
+    throw new Error(`Could not parse Codex config at ${configPath}; set WEBIQ_ENDPOINT explicitly`);
+  }
+  const provider = config.model_provider || "openai";
+  const baseUrl = config.model_providers?.[provider]?.base_url ??
+    (provider === "openai" ? config.openai_base_url : undefined);
+  if (typeof baseUrl !== "string" || !baseUrl.trim()) {
+    throw new Error(`Codex model provider ${provider} has no base_url; set WEBIQ_ENDPOINT explicitly`);
+  }
+  let url;
+  try {
+    url = new URL(baseUrl.trim());
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) {
+      throw new Error();
+    }
+  } catch {
+    throw new Error("Invalid Codex model provider base_url; set WEBIQ_ENDPOINT explicitly");
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "").replace(/\/v1$/, "") + SEARCH_PATH;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
 export function readConfig(env = process.env) {
+  const endpoint = envValue(env, "ENDPOINT");
   return {
-    endpoint: normalizeEndpoint(envValue(env, "ENDPOINT") || DEFAULT_ENDPOINT),
+    endpoint: endpoint ? normalizeEndpoint(endpoint) : codexSearchEndpoint(env),
     apiKey: envValue(env, "API_KEY"),
     token: envValue(env, "TOKEN"),
     timeoutMs: integer(envValue(env, "TIMEOUT_MS"), 30_000, 1_000, 300_000),
@@ -144,6 +183,7 @@ export async function search(query, config, options = {}) {
   if (trimmed.length > MAX_QUERY_LENGTH) {
     throw new Error(`query must not exceed ${MAX_QUERY_LENGTH} characters`);
   }
+  config ??= readConfig();
 
   const requestedMaxResults = options.maxResults ?? config.maxResults;
   const maxResults = Number.isFinite(requestedMaxResults)
@@ -327,7 +367,7 @@ function negotiatedProtocolVersion(requested) {
     : PROTOCOL_VERSION;
 }
 
-export async function handleMessage(message, config = readConfig(), context = defaultRequestContext) {
+export async function handleMessage(message, config, context = defaultRequestContext) {
   if (!isRecord(message) || message.jsonrpc !== "2.0" || typeof message.method !== "string") {
     return rpcError(isRecord(message) && "id" in message ? message.id : null, -32600, "Invalid Request");
   }
@@ -398,7 +438,7 @@ export async function handleMessage(message, config = readConfig(), context = de
   }
 }
 
-export function runStdio(config = readConfig()) {
+export function runStdio(config) {
   process.stdin.setEncoding("utf8");
   const context = createRequestContext();
   let buffer = "";

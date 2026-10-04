@@ -11,9 +11,14 @@
     "directory": "plugins/webiq-search"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "vendor:toml": "node scripts/vendor-toml.mjs"
   },
   "engines": {
     "node": ">=20.11"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "smol-toml": "1.9.0"
   }
 }

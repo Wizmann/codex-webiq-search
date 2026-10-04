@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   createRequestContext,
-  DEFAULT_ENDPOINT,
   formatResults,
   handleMessage,
   MAX_RESPONSE_BYTES,
@@ -26,7 +29,6 @@ async function withServer(handler, run) {
 }
 
 test("configuration is small, strict, and clamped", () => {
-  assert.equal(readConfig({}).endpoint, DEFAULT_ENDPOINT);
   assert.equal(normalizeEndpoint("https://api.microsoft.ai"), "https://api.microsoft.ai/v3/search/web");
   const config = readConfig({
     WEBIQ_ENDPOINT: "https://api.microsoft.ai",
@@ -39,6 +41,7 @@ test("configuration is small, strict, and clamped", () => {
   assert.equal(config.timeoutMs, 1_000);
 
   const malformed = readConfig({
+    WEBIQ_ENDPOINT: "https://example.test",
     WEBIQ_MAX_RESULTS: "5junk",
     WEBIQ_TIMEOUT_MS: "1.5",
     WEBIQ_MAX_LENGTH: "Infinity",
@@ -46,6 +49,160 @@ test("configuration is small, strict, and clamped", () => {
   assert.equal(malformed.maxResults, 5);
   assert.equal(malformed.timeoutMs, 30_000);
   assert.equal(malformed.maxLength, 3_000);
+});
+
+function withCodexConfig(t, content) {
+  const directory = mkdtempSync(join(tmpdir(), "webiq-config-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  if (content !== undefined) writeFileSync(join(directory, "config.toml"), content);
+  return { CODEX_HOME: directory };
+}
+
+test("search follows the selected provider base_url and replaces the v1 path", async (t) => {
+  await withServer(
+    (request, response) => {
+      assert.equal(request.url, "/v3/search/web");
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ webResults: [{ title: "Source", url: "https://example.com", content: "Found" }] }));
+    },
+    async (endpoint) => {
+      const origin = new URL(endpoint).origin;
+      const env = withCodexConfig(t, `model_provider = 'active'\n[model_providers.unused]\nbase_url = 'http://127.0.0.1:1/v1/'\n[model_providers.'active']\n# base_url = 'http://127.0.0.1:2/v1/'\nbase_url = '${origin}/v1/' # current service\n`);
+      const data = await search("q", readConfig(env));
+      assert.equal(data.results[0].content, "Found");
+      writeFileSync(join(env.CODEX_HOME, "config.toml"), "model_provider = 'active'\n[model_providers.active]\nbase_url = 'http://192.168.31.99:8313/v1/'\n");
+      assert.equal(readConfig(env).endpoint, "http://192.168.31.99:8313/v3/search/web");
+    },
+  );
+});
+
+test("base_url keeps gateway path prefixes and discards model query parameters", (t) => {
+  const env = withCodexConfig(t, `model_provider = "gateway"\nmodel_providers.gateway = { base_url = "https://gateway.example/api/tenant/v1/?model=test#anchor" }\n`);
+  assert.equal(readConfig(env).endpoint, "https://gateway.example/api/tenant/v3/search/web");
+});
+
+test("the built-in provider can use openai_base_url", (t) => {
+  const env = withCodexConfig(t, "openai_base_url = 'https://gateway.example/v1'\n");
+  assert.equal(readConfig(env).endpoint, "https://gateway.example/v3/search/web");
+});
+
+test("explicit WEBIQ_ENDPOINT works independently of a broken Codex configuration", (t) => {
+  const env = withCodexConfig(t, "invalid = [");
+  assert.equal(readConfig({ ...env, WEBIQ_ENDPOINT: "https://api.microsoft.ai" }).endpoint, "https://api.microsoft.ai/v3/search/web");
+});
+
+test("missing or broken provider configuration never silently requests localhost", (t) => {
+  const missing = withCodexConfig(t);
+  assert.throws(() => readConfig(missing), /WEBIQ_ENDPOINT/);
+  const noProvider = withCodexConfig(t, "model_provider = 'active'\n[model_providers.other]\nbase_url = 'https://wrong.example/v1'\n");
+  assert.throws(() => readConfig(noProvider), /WEBIQ_ENDPOINT/);
+  const malformed = withCodexConfig(t, "invalid = [");
+  assert.throws(() => readConfig(malformed), /parse Codex config.*WEBIQ_ENDPOINT/);
+});
+
+test("base_url accepts valid TOML string forms and preserves non-v1 gateway paths", (t) => {
+  const env = withCodexConfig(t, 'model_provider = "active"\n[model_providers.active]\nbase_url = "https://gateway.example/\\u0061pi/"\n');
+  assert.equal(readConfig(env).endpoint, "https://gateway.example/api/v3/search/web");
+});
+
+test("invalid base_url errors do not disclose provider credentials", (t) => {
+  const env = withCodexConfig(t, "model_provider = 'active'\n[model_providers.active]\nbase_url = 'secret-base-url'\nexperimental_bearer_token = 'secret-token'\n");
+  assert.throws(() => readConfig(env), (error) => {
+    assert.match(error.message, /Invalid.*base_url.*WEBIQ_ENDPOINT/);
+    assert.doesNotMatch(error.message, /secret-base-url|secret-token/);
+    return true;
+  });
+});
+
+test("base_url credentials are rejected without exposing them in tool errors", (t) => {
+  const env = withCodexConfig(t, "model_provider = 'active'\n[model_providers.active]\nbase_url = 'https://model-user:model-secret@gateway.example/v1'\n");
+  assert.throws(() => readConfig(env), (error) => {
+    assert.match(error.message, /Invalid.*base_url.*WEBIQ_ENDPOINT/);
+    assert.doesNotMatch(error.message, /model-user|model-secret/);
+    return true;
+  });
+});
+
+function startMcp(t, env) {
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../server.mjs", import.meta.url))], {
+    env: { ...process.env, ...env, WEBIQ_ENDPOINT: "" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const pending = new Map();
+  let output = "";
+  let errors = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { errors += chunk; });
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    output += chunk;
+    let newline;
+    while ((newline = output.indexOf("\n")) !== -1) {
+      const line = output.slice(0, newline);
+      output = output.slice(newline + 1);
+      if (!line.trim()) continue;
+      const response = JSON.parse(line);
+      const task = pending.get(response.id);
+      if (task) {
+        pending.delete(response.id);
+        clearTimeout(task.timer);
+        task.resolve(response);
+      }
+    }
+  });
+  const failPending = (error) => {
+    for (const task of pending.values()) {
+      clearTimeout(task.timer);
+      task.reject(error);
+    }
+    pending.clear();
+  };
+  child.on("error", failPending);
+  child.on("exit", (code) => failPending(new Error(`MCP exited (${code}): ${errors}`)));
+  t.after(() => {
+    child.kill();
+    failPending(new Error("MCP test finished"));
+  });
+  return (id, method, params = {}) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`MCP request ${id} timed out: ${errors}`));
+    }, 5_000);
+    pending.set(id, { resolve, reject, timer });
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+  });
+}
+
+test("MCP search reloads base_url without restarting or reusing model credentials", async (t) => {
+  const handler = (_request, response) => {
+    assert.equal(_request.url, "/v3/search/web");
+    assert.equal(_request.headers.authorization, undefined);
+    response.end(JSON.stringify({ webResults: [{ url: "https://example.com/source", content: "live result" }] }));
+  };
+  await withServer(handler, async (firstEndpoint) => {
+    await withServer(handler, async (secondEndpoint) => {
+      const env = withCodexConfig(t, "model_provider = 'active'\n");
+      const call = startMcp(t, { ...env, WEBIQ_API_KEY: "", WEBIQ_TOKEN: "" });
+      const initialized = await call(1, "initialize", { protocolVersion: "2025-06-18" });
+      assert.equal(initialized.result.serverInfo.name, "webiq-search");
+      for (const [index, endpoint] of [firstEndpoint, secondEndpoint].entries()) {
+        writeFileSync(join(env.CODEX_HOME, "config.toml"), `model_provider = 'active'\n[model_providers.active]\nbase_url = '${new URL(endpoint).origin}/v1/'\nexperimental_bearer_token = 'model-secret'\n`);
+        const response = await call(index + 2, "tools/call", { name: "webiq_search", arguments: { query: "q" } });
+        assert.ok(!response.result.isError, response.result.content[0].text);
+        assert.match(response.result.content[0].text, /live result/);
+      }
+    });
+  });
+});
+
+test("MCP stays available and reports an actionable tool error when config is missing", async (t) => {
+  const env = withCodexConfig(t);
+  const call = startMcp(t, env);
+  const listed = await call(1, "tools/list");
+  assert.equal(listed.result.tools[0].name, "webiq_search");
+  const searched = await call(2, "tools/call", { name: "webiq_search", arguments: { query: "q" } });
+  assert.equal(searched.result.isError, true);
+  assert.match(searched.result.content[0].text, /WEBIQ_ENDPOINT/);
 });
 
 test("package, plugin, and server versions stay in sync", () => {

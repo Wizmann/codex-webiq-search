@@ -5,6 +5,7 @@
       "args": ["./server.mjs"],
       "cwd": ".",
       "env_vars": [
+        "CODEX_HOME",
         "WEBIQ_ENDPOINT",
         "WEBIQ_API_KEY",
         "WEBIQ_TOKEN",

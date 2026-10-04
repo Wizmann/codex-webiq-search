@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "Web IQ Search",
     "shortDescription": "Search the web through Microsoft Web IQ.",
-    "longDescription": "Adds one compact, read-only webiq_search tool backed by Microsoft Web IQ or a local ghc-api proxy.",
+    "longDescription": "Adds one compact, read-only webiq_search tool backed by Microsoft Web IQ. Uses WEBIQ_ENDPOINT when configured, otherwise follows the Codex model provider base_url.",
     "developerName": "sxwxs",
     "category": "Productivity",
     "capabilities": [
